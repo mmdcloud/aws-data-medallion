@@ -1,0 +1,121 @@
+{
+  "Comment": "Medallion Architecture Data Pipeline",
+  "StartAt": "StartBronzeCrawler",
+  "States": {
+    "StartBronzeCrawler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": {
+        "Name": "${aws_glue_crawler.bronze_crawler.name}"
+      },
+      "Next": "WaitForBronzeCrawler",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ]
+    },
+    "WaitForBronzeCrawler": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "CheckBronzeCrawlerStatus"
+    },
+    "CheckBronzeCrawlerStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Parameters": {
+        "Name": "${aws_glue_crawler.bronze_crawler.name}"
+      },
+      "Next": "IsBronzeCrawlerComplete"
+    },
+    "IsBronzeCrawlerComplete": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "READY",
+          "Next": "StartBronzeToSilverJob"
+        }
+      ],
+      "Default": "WaitForBronzeCrawler"
+    },
+    "StartBronzeToSilverJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${aws_glue_job.bronze_to_silver.name}"
+      },
+      "Next": "StartSilverCrawler",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ]
+    },
+    "StartSilverCrawler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": {
+        "Name": "${aws_glue_crawler.silver_crawler.name}"
+      },
+      "Next": "WaitForSilverCrawler"
+    },
+    "WaitForSilverCrawler": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "CheckSilverCrawlerStatus"
+    },
+    "CheckSilverCrawlerStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Parameters": {
+        "Name": "${aws_glue_crawler.silver_crawler.name}"
+      },
+      "Next": "IsSilverCrawlerComplete"
+    },
+    "IsSilverCrawlerComplete": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "READY",
+          "Next": "StartSilverToGoldJob"
+        }
+      ],
+      "Default": "WaitForSilverCrawler"
+    },
+    "StartSilverToGoldJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${aws_glue_job.silver_to_gold.name}"
+      },
+      "Next": "StartGoldCrawler",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ]
+    },
+    "StartGoldCrawler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": {
+        "Name": "${aws_glue_crawler.gold_crawler.name}"
+      },
+      "Next": "PipelineComplete"
+    },
+    "PipelineComplete": {
+      "Type": "Succeed"
+    }
+  }
+}
