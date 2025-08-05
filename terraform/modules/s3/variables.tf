@@ -37,6 +37,16 @@ variable "bucket_notification" {
     lambda_function = []
   }
 }
+
+variable "sse_rules" {
+  description = "List of server-side encryption configuration rules"
+  type = list(object({
+    kms_master_key_id = string
+    sse_algorithm     = string
+  }))
+  default = []
+}
+
 # variable "lifecycle_policies" {
 #   type = list(object({
 #     id     = string

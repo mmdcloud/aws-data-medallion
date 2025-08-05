@@ -63,6 +63,21 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   }
 }
 
+resource "aws_s3_bucket_server_side_encryption_configuration" "athena_results" {
+  bucket = aws_s3_bucket.bucket.id
+
+  dynamic "rule" {
+    for_each = var.sse_rules
+    content {
+      apply_server_side_encryption_by_default {
+        kms_master_key_id = rule.value.kms_master_key_id
+        sse_algorithm     = rule.value.sse_algorithm
+      }
+    }
+  }
+}
+
+
 # resource "aws_s3_bucket_lifecycle_configuration" "lifecyle_policy" {
 #   bucket = aws_s3_bucket.bucket.id
 #   count  = length(var.lifecycle_policies) > 0 ? 1 : 0    

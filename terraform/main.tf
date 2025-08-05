@@ -21,6 +21,7 @@ data "aws_caller_identity" "current" {}
 # -----------------------------------------------------------------------------------------
 # VPC Configuration
 # -----------------------------------------------------------------------------------------
+
 module "vpc" {
   source                = "./modules/vpc/vpc"
   vpc_name              = "vpc"
@@ -157,11 +158,11 @@ resource "aws_vpc_endpoint" "glue" {
 # KMS Configuration
 # -----------------------------------------------------------------------------------------
 
-resource "aws_kms_key" "data_lake_key" {
+module "data_lake_key" {
+  source                  = "./modules/kms"
   description             = "KMS key for data lake encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -176,42 +177,51 @@ resource "aws_kms_key" "data_lake_key" {
       }
     ]
   })
-}
-
-resource "aws_kms_alias" "data_lake_key_alias" {
-  name          = "alias/${var.project_name}-data-lake-key"
-  target_key_id = aws_kms_key.data_lake_key.key_id
+  alias_name = "alias/${var.project_name}-data-lake-key"
 }
 
 # -----------------------------------------------------------------------------------------
 # Athena Configuration
 # -----------------------------------------------------------------------------------------
 
-resource "aws_s3_bucket" "athena_results" {
-  bucket = "${var.project_name}-athena-results-${var.environment}-${random_id.bucket_suffix.hex}"
-  tags = merge(local.common_tags, {
-    Name = "Athena Query Results"
-  })
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "athena_results" {
-  bucket = aws_s3_bucket.athena_results.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      kms_master_key_id = aws_kms_key.data_lake_key.arn
+module "athena_results" {
+  source             = "./modules/s3"
+  bucket_name        = "${var.project_name}-athena-results-${var.environment}-${random_id.bucket_suffix.hex}"
+  objects            = []
+  versioning_enabled = "Enabled"
+  sse_rules = [
+    {
+      kms_master_key_id = "${module.data_lake_key.arn}"
       sse_algorithm     = "aws:kms"
     }
+  ]
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    },
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = true
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
   }
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "athena_results" {
-  bucket = aws_s3_bucket.athena_results.id
-
+resource "aws_s3_bucket_lifecycle_configuration" "athena_results_lifecycle_configuration" {
+  bucket = module.athena_results.bucket
   rule {
     id     = "athena_results_lifecycle"
     status = "Enabled"
-
     expiration {
       days = 30
     }
@@ -220,20 +230,16 @@ resource "aws_s3_bucket_lifecycle_configuration" "athena_results" {
 
 resource "aws_athena_workgroup" "medallion_workgroup" {
   name = "${var.project_name}-workgroup"
-
   configuration {
     enforce_workgroup_configuration    = true
     publish_cloudwatch_metrics_enabled = true
-
     result_configuration {
-      output_location = "s3://${aws_s3_bucket.athena_results.bucket}/"
+      output_location = "s3://${module.athena_results.bucket}/"
     }
-
     engine_version {
       selected_engine_version = "Athena engine version 3"
     }
   }
-
   tags = local.common_tags
 }
 
@@ -244,7 +250,6 @@ resource "aws_athena_workgroup" "medallion_workgroup" {
 resource "aws_config_configuration_recorder" "data_lake_config" {
   name     = "${var.project_name}-config-recorder"
   role_arn = aws_iam_role.config_role.arn
-
   recording_group {
     all_supported                 = false
     include_global_resource_types = false
@@ -302,7 +307,7 @@ module "data_lake_secrets" {
   source                  = "./modules/secrets-manager"
   name                    = "${var.project_name}-secrets"
   description             = "Secrets for data lake operations"
-  kms_key_id              = aws_kms_key.data_lake_key.arn
+  kms_key_id              = module.data_lake_key.arn
   recovery_window_in_days = 7
   secret_string = jsonencode({
     database_connection = "placeholder-connection-string"
@@ -314,11 +319,16 @@ module "data_lake_secrets" {
 # SNS Configuration
 # -----------------------------------------------------------------------------------------
 
-resource "aws_sns_topic" "alerts" {
-  name              = "${var.project_name}-alerts"
-  kms_master_key_id = aws_kms_key.data_lake_key.arn
-
-  tags = local.common_tags
+module "alerts" {
+  source     = "./modules/sns"
+  topic_name = "${var.project_name}-alerts"
+  kms_key_id = module.data_lake_key.arn
+  subscriptions = [
+    {
+      protocol = "email"
+      endpoint = "madmaxcloudonline@gmail.com"
+    }
+  ]
 }
 
 # -----------------------------------------------------------------------------------------
@@ -403,7 +413,7 @@ resource "aws_cloudwatch_metric_alarm" "bronze_to_silver_glue_job_failures" {
   statistic           = "Sum"
   threshold           = "0"
   alarm_description   = "This metric monitors bronze_to_silver glue job failures"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [module.alerts.arn]
 
   dimensions = {
     JobName = aws_glue_job.bronze_to_silver.name
@@ -422,7 +432,7 @@ resource "aws_cloudwatch_metric_alarm" "silver_to_gold_glue_job_failures" {
   statistic           = "Sum"
   threshold           = "0"
   alarm_description   = "This metric monitors silver_to_gold glue job failures"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [module.alerts.arn]
 
   dimensions = {
     JobName = aws_glue_job.silver_to_gold.name
@@ -441,7 +451,7 @@ resource "aws_cloudwatch_metric_alarm" "s3_storage_cost" {
   statistic           = "Maximum"
   threshold           = "100"
   alarm_description   = "This metric monitors S3 storage costs"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [module.alerts.arn]
 
   dimensions = {
     Currency    = "USD"
@@ -454,6 +464,126 @@ resource "aws_cloudwatch_metric_alarm" "s3_storage_cost" {
 # -----------------------------------------------------------------------------------------
 # S3 Configuration
 # -----------------------------------------------------------------------------------------
+
+module "bronze" {
+  source      = "./modules/s3"
+  bucket_name = local.bronze_bucket_name
+  objects = [
+    {
+      key    = "scripts/"
+      source = ""
+    },
+    {
+      key    = "logs/"
+      source = ""
+    },
+    {
+      key    = "temp/"
+      source = ""
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    },
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = true
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
+  }
+}
+
+module "silver" {
+  source      = "./modules/s3"
+  bucket_name = local.silver_bucket_name
+  objects = [
+    {
+      key    = "scripts/"
+      source = ""
+    },
+    {
+      key    = "logs/"
+      source = ""
+    },
+    {
+      key    = "temp/"
+      source = ""
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    },
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = true
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
+  }
+}
+
+module "gold" {
+  source      = "./modules/s3"
+  bucket_name = local.gold_bucket_name
+  objects = [
+    {
+      key    = "scripts/"
+      source = ""
+    },
+    {
+      key    = "logs/"
+      source = ""
+    },
+    {
+      key    = "temp/"
+      source = ""
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    },
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = true
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
+  }
+}
 
 resource "aws_s3_bucket" "bronze" {
   bucket = local.bronze_bucket_name
@@ -475,7 +605,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "bronze" {
 
   rule {
     apply_server_side_encryption_by_default {
-      kms_master_key_id = aws_kms_key.data_lake_key.arn
+      kms_master_key_id = module.data_lake_key.arn
       sse_algorithm     = "aws:kms"
     }
     bucket_key_enabled = true
@@ -558,7 +688,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "silver" {
 
   rule {
     apply_server_side_encryption_by_default {
-      kms_master_key_id = aws_kms_key.data_lake_key.arn
+      kms_master_key_id = module.data_lake_key.arn
       sse_algorithm     = "aws:kms"
     }
     bucket_key_enabled = true
@@ -632,7 +762,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "gold" {
 
   rule {
     apply_server_side_encryption_by_default {
-      kms_master_key_id = aws_kms_key.data_lake_key.arn
+      kms_master_key_id = module.data_lake_key.arn
       sse_algorithm     = "aws:kms"
     }
     bucket_key_enabled = true
@@ -769,11 +899,11 @@ resource "aws_iam_role_policy" "glue_s3_policy" {
           "s3:ListBucket"
         ]
         Resource = [
-          aws_s3_bucket.bronze.arn,
+          "${aws_s3_bucket.bronze.arn}",
           "${aws_s3_bucket.bronze.arn}/*",
-          aws_s3_bucket.silver.arn,
+          "${aws_s3_bucket.silver.arn}",
           "${aws_s3_bucket.silver.arn}/*",
-          aws_s3_bucket.gold.arn,
+          "${aws_s3_bucket.gold.arn}",
           "${aws_s3_bucket.gold.arn}/*"
         ]
       },
@@ -783,7 +913,7 @@ resource "aws_iam_role_policy" "glue_s3_policy" {
           "kms:Decrypt",
           "kms:GenerateDataKey"
         ]
-        Resource = [aws_kms_key.data_lake_key.arn]
+        Resource = [module.data_lake_key.arn]
       }
     ]
   })
@@ -959,12 +1089,12 @@ resource "aws_cloudwatch_log_group" "step_functions" {
   tags = local.common_tags
 }
 
-module "step_function_role" {
+module "step_functions_role" {
   source             = "./modules/iam"
-  role_name          = "step_function_role"
-  role_description   = "step_function_role"
-  policy_name        = "step_function_policy"
-  policy_description = "step_function_policy"
+  role_name          = "step_functions_role"
+  role_description   = "step_functions_role"
+  policy_name        = "step_functions_policy"
+  policy_description = "step_functions_policy"
   assume_role_policy = <<EOF
     {
         "Version": "2012-10-17",
@@ -1019,10 +1149,6 @@ module "medallion_pipeline" {
   log_include_execution_data = true
   log_level                  = "ALL"
   definition = templatefile("${path.module}/files/step-function-definition.json", {
-    table_sanity_check_function_arn = module.table_sanity_check_function.arn
-    extract_table_data_function_arn = module.extract_table_data_function.arn
-    invalid_invoice_error_topic_arn = module.invalid_invoice_error_topic.topic_arn
-    data_storage_failure_topic_arn  = module.data_storage_failure_topic.topic_arn
   })
 }
 
@@ -1119,7 +1245,7 @@ resource "aws_cloudwatch_metric_alarm" "pipeline_failures" {
   statistic           = "Sum"
   threshold           = "0"
   alarm_description   = "This metric monitors step function failures"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [module.alerts.arn]
 
   dimensions = {
     StateMachineArn = module.medallion_pipeline.arn

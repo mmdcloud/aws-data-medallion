@@ -21,7 +21,7 @@ output "glue_database_name" {
 
 output "step_function_arn" {
   description = "ARN of the Step Functions state machine"
-  value       = aws_sfn_state_machine.medallion_pipeline.arn
+  value       = module.medallion_pipeline.arn
 }
 
 output "kms_key_arn" {
@@ -42,7 +42,7 @@ output "cloudwatch_dashboard_url" {
 
 output "secrets_manager_secret_arn" {
   description = "ARN of the Secrets Manager secret"
-  value       = aws_secretsmanager_secret.data_lake_secrets.arn
+  value       = module.data_lake_secrets.arn
   sensitive   = true
 }
 
